@@ -1,0 +1,60 @@
+/* BOMPA REMUS 335CB */
+
+1) Explicație pentru structura creată (sau soluția de ansamblu aleasă)
+-comunicarea in retea, de la client la server se realizeaza in mod asincron folosind apelurile
+WSASend si WSARecv.
+- in cazul fisierelor statice se trimite asincron direct din kernel folosind API de zero
+-copying TransmitFile
+- in cazul fisierelor dinamice datele se trimit asincron folosind funcțiile ReadFile și
+WriteFile cu argumentele de Overlapped I/O activate
+- asteptarea încheierii operațiilor asincrone (atât pe fisiere cat si pe socketi) se realizeaza
+unificat, folosind I/O Completion Ports
+-exista 3 cazuri in care programul se poate afla, fiecare avand niste stari. Cazurile si starile
+sunt verificate in functia handle_aio.
+	-initial programul se afla in cazul 0, iar la primirea unei cereri de la un client se apeleaza
+functia handle_client_request
+	-functia analizeaza cereaza apeland receive_request iar daca se intoarce STATE_DATA_RECEIVED,
+se verifica calea salvata in request_path:
+	*)nu este valida => caz 0 
+	*)are ca prefix directorul static => caz 1
+	*)are ca prefix directorul dynamic => caz 2
+	*)nu are un prefix valid => caz 0
+	-se trimite header-ul coresunzator (de eroare sau de raspuns_ prin apelul functiei:
+		connection_schedule_socket_send
+	-se primeste notificare in structura WSAOVERLAPPED send_ov (s-a reusit trimiterea unui mesaj)
+si se verifica pe ce caz sunt:
+		*)caz 0 => trimit mesaj de eroare daca nu s-a trimis complet (prin apelul send_message ) si
+		inchid conexiunea in caz contrar
+		*)caz 1 => mai trimit octeti din antetul mesajului (prin apelul send_message) sau transmit
+		fiserul prin apelul TransmitFile si ma duc in starea 1. In starea 1 transimit urmatorii
+		octeti din fisier in cazul in care nu s-a transmis complet si apoi inchid conexiunea.
+		*)caz 2 => mai trimit antetul mesajului sau adaug fiserul ce trebuie citit in I/O 
+		Completion Ports, reprezentat prin handle-ul iocp, apelez functia send_file_aio si ma duc
+		in starea 1. Functia send_file_aio citeste asincron din fiser cate BUFSIZ octeti din fisier,
+		de la pozitia la care a ramas, folosind structura de tipul OVERLAPPED conn->o. Cand s-au
+		citit octetii din fisier si se notifica structura conn->o, pe cazul 2, starea 1, se copie
+		buffer-ul in care citeste din fiser in buffer-ul de transmisie in retea si ultimul se 
+		transmite asincron prin apelul connection_schedule_socket_send.
+		Cand s-a terminat transmisia in retea, se notifica structura conn->send_ov, pe cazul 2, 
+		starea 1, se mai transmit octeti daca nu s-a transmis tot (send_message) iar in caz contrar
+		se apeleaza din nou functia send_file_aio pentru a citi din fiser. Daca numarul de octeti 
+		cititi deja este egal cu dimensiunea fisierului se inchide conexiunea.
+
+2) Implementare
+- am implementat intregul enunt al temei
+
+3) Cum se compilează și cum se rulează?
+- am folosit fisierele puse la dispozitie in scheletul temei:
+		http_parser.c, http_parser.h
+		sock_util.c, sock_util.h
+		debug.h, util.h, w_iocp.h, aws.h
+	-makefile-ul obtine mai intai fisiere obiect pentru http_parser.c, sock_util.c si aws.c
+	-cele 3 fisere obiect obtinute sunt apoi linkate cu bibliotecile dinamice pentru programare
+	cu socketi pe windows:
+		*) wsock32.lib
+		*) ws2_32.lib
+	-dintr-un terminal powershell se ruleaza serverul .\aws iar din altul sau din cygwin se pot
+trimite comenzi HTTP pentru a cere trimiterea unui fisier
+
+4) Bibliografie
+*) https://ocw.cs.pub.ro/courses/so/laboratoare/laborator-11
